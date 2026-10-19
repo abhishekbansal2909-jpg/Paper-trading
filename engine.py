@@ -13,40 +13,33 @@ AVAILABLE_CAPITAL = 1000000  # ₹10 Lakhs margin pool
 fetcher = LiveMarketFetcher()
 
 def get_master_lot_sizes():
-    """Fetches official NSE F&O lot sizes directly from the exchange on startup."""
-    print("Fetching official NSE lot size master file...")
-    url = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    """Fetches official NFO lot sizes dynamically using the open Kite instruments dump."""
+    print("Fetching official NFO lot sizes via Kite API...")
+    url = "https://api.kite.trade/instruments"
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        df = pd.read_csv(url)
+        # Filter for F&O exchange and drop duplicate tickers to map one lot size per symbol
+        nfo_df = df[df['exchange'] == 'NFO'].copy()
+        lot_map = nfo_df.drop_duplicates(subset=['name'])[['name', 'lot_size']]
         
-        # Read CSV, skipping any malformed metadata lines at the top or bottom
-        df = pd.read_csv(io.StringIO(res.text), on_bad_lines='skip', skipinitialspace=True)
-        df.columns = df.columns.str.strip()
+        lot_dict = pd.Series(
+            lot_map['lot_size'].values, 
+            index=lot_map['name'].str.strip().str.upper()
+        ).to_dict()
         
-        lot_dict = {}
-        for _, row in df.iterrows():
-            if 'SYMBOL' in row:
-                sym = str(row['SYMBOL']).strip()
-                # NSE file usually has the lot size for the near month in the 3rd column (index 2)
-                try:
-                    val = str(row.iloc[2]).strip()
-                    if val.isdigit():
-                        lot_dict[sym] = int(val)
-                except IndexError:
-                    continue
-                    
-        print(f"Loaded official lot sizes for {len(lot_dict)} F&O tickers.")
+        print(f"Loaded official lot sizes for {len(lot_dict)} NFO tickers.")
         return lot_dict
     except Exception as e:
-        print(f"Warning: Failed to fetch NSE lot sizes ({e}). Fallback to 1.")
+        print(f"Warning: Failed to fetch Kite lot sizes ({e}). Fallback to 1.")
         return {}
 
 NSE_MASTER_LOTS = get_master_lot_sizes()
 
-def get_lot_size(symbol, entry_price=None):
-    """Returns official exchange multiple; falls back to 1 if unlisted."""
-    return NSE_MASTER_LOTS.get(symbol.strip().upper(), 1)
+def get_lot_size(symbol, entry_price=100):
+    """Returns official exchange multiple from Kite."""
+    sym = symbol.strip().upper()
+    # Cast to int, falling back to 1 if missing
+    return int(NSE_MASTER_LOTS.get(sym, 1))
 
 # ---------------------------------------------------------
 # 2. WATCHLIST CONFIGURATION
