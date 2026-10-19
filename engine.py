@@ -19,15 +19,23 @@ def get_master_lot_sizes():
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
         res = requests.get(url, headers=headers, timeout=10)
-        df = pd.read_csv(io.StringIO(res.text))
+        
+        # Read CSV, skipping any malformed metadata lines at the top or bottom
+        df = pd.read_csv(io.StringIO(res.text), on_bad_lines='skip', skipinitialspace=True)
         df.columns = df.columns.str.strip()
         
         lot_dict = {}
         for _, row in df.iterrows():
-            sym = str(row['SYMBOL']).strip()
-            val = str(row.iloc[2]).strip()
-            if val.isdigit():
-                lot_dict[sym] = int(val)
+            if 'SYMBOL' in row:
+                sym = str(row['SYMBOL']).strip()
+                # NSE file usually has the lot size for the near month in the 3rd column (index 2)
+                try:
+                    val = str(row.iloc[2]).strip()
+                    if val.isdigit():
+                        lot_dict[sym] = int(val)
+                except IndexError:
+                    continue
+                    
         print(f"Loaded official lot sizes for {len(lot_dict)} F&O tickers.")
         return lot_dict
     except Exception as e:
