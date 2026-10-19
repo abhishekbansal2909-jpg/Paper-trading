@@ -1,12 +1,13 @@
-import requests
 import pandas as pd
+from curl_cffi import requests
 import yfinance as yf
 import time
 from datetime import datetime, timedelta
 
+
 class LiveMarketFetcher:
     def __init__(self):
-        self.session = requests.Session()
+        self.session = requests.Session(impersonate = "chrome120")
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "Accept": "*/*",
