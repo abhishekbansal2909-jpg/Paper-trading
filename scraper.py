@@ -45,6 +45,11 @@ class LiveMarketFetcher:
                     continue
                 if res.status_code == 200:
                     data = res.json()
+
+                    if not data or 'records' not in data:
+                        return []
+
+                    
                     spot = data['records']['underlyingValue']
                     options = data['records']['data']
                     
