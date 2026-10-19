@@ -7,11 +7,9 @@ from datetime import datetime, timedelta
 
 class LiveMarketFetcher:
     def __init__(self):
-         # curl_cffi bypasses Akamai TLS fingerprinting
+        # curl_cffi bypasses Akamai TLS fingerprinting
         self.session = requests.Session(impersonate="chrome120")
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept": "*/*",
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": "https://www.nseindia.com/option-chain"  # Critical for bypassing the hang
         })
@@ -46,9 +44,9 @@ class LiveMarketFetcher:
                 if res.status_code == 200:
                     data = res.json()
 
+                    # SAFETY CHECK: Skip if NSE returns an empty object {}
                     if not data or 'records' not in data:
                         return []
-
                     
                     spot = data['records']['underlyingValue']
                     options = data['records']['data']
