@@ -109,6 +109,28 @@ def close_trade_in_db(trade_id, exit_price, pnl):
 # ---------------------------------------------------------
 # 4. POSITION MONITOR & TSL (TRAILING STOP LOSS)
 # ---------------------------------------------------------
+def calculate_indian_futures_fees(entry_price, exit_price, qty, direction):
+    """Calculates Zerodha brokerage + 2026 STT + Exchange + Stamp + GST for Futures ONLY."""
+    entry_val = entry_price * qty
+    exit_val = exit_price * qty
+    total_val = entry_val + exit_val
+
+    entry_brokerage = min(entry_val * 0.0003, 20.0)
+    exit_brokerage = min(exit_val * 0.0003, 20.0)
+    total_brokerage = entry_brokerage + exit_brokerage
+
+    # 2026 Revised STT Rate
+    sell_val = exit_val if direction == "BUY" else entry_val
+    stt = sell_val * 0.0005 
+
+    txn = total_val * 0.000019
+    sebi = total_val * 0.000001
+    buy_val = entry_val if direction == "BUY" else exit_val
+    stamp = buy_val * 0.00002
+    gst = (total_brokerage + txn + sebi) * 0.18
+
+    return total_brokerage + stt + txn + sebi + stamp + gst
+
 def manage_open_positions():
     open_trades = get_open_positions()
     if not open_trades:
@@ -138,8 +160,17 @@ def manage_open_positions():
             # Stop condition check
             if (direction == "BUY" and spot <= entry_price * (1 - current_stop_pct)) or \
                (direction == "SELL" and spot >= entry_price * (1 + current_stop_pct)):
-                net_pnl = (spot - entry_price) * qty if direction == "BUY" else (entry_price - spot) * qty
+                
+                # Calculate Gross PnL using real lot quantity
+                gross_pnl = (spot - entry_price) * qty if direction == "BUY" else (entry_price - spot) * qty
+                
+                # Deduct true F&O fees and taxes
+                fees = calculate_indian_futures_fees(entry_price, spot, qty, direction)
+                net_pnl = gross_pnl - fees
+                
                 print(f"[EXIT TRIGGERED] {symbol} hit stop level at ₹{spot:.2f}")
+                print(f"--> Gross PnL: ₹{gross_pnl:.2f} | Fees & Taxes: ₹{fees:.2f} | Net PnL: ₹{net_pnl:.2f}")
+                
                 close_trade_in_db(trade_id, spot, net_pnl)
                 
         except Exception as e:
@@ -153,75 +184,4 @@ def process_signal(ticker, entry_price, direction):
     
     # Check if we already have an open position in this stock
     open_symbols = [row[1] for row in get_open_positions()]
-    if ticker in open_symbols:
-        return
-    
-    lot_size = get_lot_size(ticker, entry_price)
-    quantity = lot_size * 1  # Trade exactly 1 lot
-    contract_value = quantity * entry_price
-    margin_required = contract_value * 0.20  # 20% margin
-    
-    if AVAILABLE_CAPITAL >= margin_required:
-        print(f"--> [SIGNAL EXECUTED] {direction} 1 lot ({quantity} shares) of {ticker} @ ₹{entry_price:.2f}")
-        AVAILABLE_CAPITAL -= margin_required
-        log_trade_to_db(ticker, direction, quantity, entry_price)
-    else:
-        print(f"Margin rejected for {ticker}: Requires ₹{margin_required:,.2f}, Available: ₹{AVAILABLE_CAPITAL:,.2f}")
-
-def scan_and_evaluate():
-    for ticker in WATCHLIST:
-        try:
-            walls = fetcher.fetch_live_walls(ticker)
-            if not walls:
-                continue
-            
-            spot = walls[0]['SPOT']
-            call_wall = None
-            put_wall = None
-            
-            for w in walls:
-                if w['OPTION_TYP'] == 'CE':
-                    call_wall = w['WALL_STRIKE']
-                elif w['OPTION_TYP'] == 'PE':
-                    put_wall = w['WALL_STRIKE']
-            
-            print(f"[{ticker}] Spot: ₹{spot:.2f} | Call Wall: {call_wall} | Put Wall: {put_wall}")
-            
-            # Extreme wall exhaustion trigger logic
-            if call_wall and spot >= call_wall:
-                print(f"--> [WALL HIT] {ticker} testing Call Wall resistance ({call_wall})")
-                process_signal(ticker, spot, "SELL")
-            elif put_wall and spot <= put_wall:
-                print(f"--> [WALL HIT] {ticker} testing Put Wall support ({put_wall})")
-                process_signal(ticker, spot, "BUY")
-                
-        except Exception as e:
-            print(f"Error scanning {ticker}: {e}")
-
-# ---------------------------------------------------------
-# 6. MAIN LOOP
-# ---------------------------------------------------------
-def main():
-    print("V1.1 Live Options Engine Initialized.")
-    
-    while True:
-        # Weekend protection
-        if datetime.datetime.today().weekday() >= 5:
-            print("Weekend detected. Engine resting for 5 minutes...")
-            time.sleep(300)
-            continue
-        
-        now = datetime.datetime.now()
-        print(f"\n--- [TICK] Cycle Started at {now.strftime('%H:%M:%S')} ---")
-        
-        # 1. Manage active positions and trailing stops
-        manage_open_positions()
-        
-        # 2. Scan watchlist for new wall breaches
-        scan_and_evaluate()
-        
-        print("Tick complete. Sleeping for 5 minutes...")
-        time.sleep(300)
-
-if __name__ == "__main__":
-    main()
+    if ticker in
