@@ -97,7 +97,7 @@ def close_trade_in_db(trade_id, exit_price, pnl):
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute("""
             UPDATE trades 
-            SET status = 'CLOSED', exit_price = ?, net_pnl = ?, exit_time = ?
+            SET status = 'STOPPPED_OUT', exit_price = ?, net_pnl = ?, exit_time = ?
             WHERE id = ?
         """, (exit_price, pnl, ts, trade_id))
         conn.commit()
