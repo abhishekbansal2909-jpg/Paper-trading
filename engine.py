@@ -132,6 +132,7 @@ def calculate_indian_futures_fees(entry_price, exit_price, qty, direction):
     return total_brokerage + stt + txn + sebi + stamp + gst
 
 def manage_open_positions():
+    global AVAILABLE_CAPITAL
     open_trades = get_open_positions()
     if not open_trades:
         return
@@ -173,6 +174,9 @@ def manage_open_positions():
                 
                 close_trade_in_db(trade_id, spot, net_pnl)
                 
+                # Return released margin + net pnl to available capital
+                AVAILABLE_CAPITAL += (entry_price * qty) + net_pnl
+                
         except Exception as e:
             print(f"Error managing position {symbol}: {e}")
 
@@ -184,4 +188,80 @@ def process_signal(ticker, entry_price, direction):
     
     # Check if we already have an open position in this stock
     open_symbols = [row[1] for row in get_open_positions()]
-    if ticker in
+    if ticker in open_symbols:
+        print(f"Skipping {ticker} - already hold an active position.")
+        return
+
+    # Calculate required margin using official Kite lot size
+    qty = get_lot_size(ticker)
+    margin_required = qty * entry_price * 0.20 # Assuming 20% margin requirement for F&O
+    
+    if margin_required > AVAILABLE_CAPITAL:
+        print(f"Insufficient capital for {ticker}. Required: ₹{margin_required:.2f}, Available: ₹{AVAILABLE_CAPITAL:.2f}")
+        return
+
+    # Execute Paper Trade
+    AVAILABLE_CAPITAL -= margin_required
+    log_trade_to_db(ticker, direction, qty, entry_price)
+
+# ---------------------------------------------------------
+# 6. MAIN ENGINE LOOP
+# ---------------------------------------------------------
+def run_engine():
+    print("\n🚀 Starting Quantitative Options Engine...")
+    print(f"Initial Capital: ₹{AVAILABLE_CAPITAL:,.2f}")
+    
+    while True:
+        try:
+            manage_open_positions()
+            
+            for symbol in WATCHLIST:
+                time.sleep(1) # Rate limit protection for scraper
+                walls = fetcher.fetch_live_walls(symbol)
+                
+                if not walls:
+                    continue
+                    
+                spot = walls[0]['SPOT']
+                
+                # Extract specific walls from the scraper list
+                pe_wall = next((w for w in walls if w['OPTION_TYP'] == 'PE'), None)
+                ce_wall = next((w for w in walls if w['OPTION_TYP'] == 'CE'), None)
+                
+                # Check Support (PE Wall) for BUY triggers
+                if pe_wall:
+                    dist_to_support = abs(spot - pe_wall['WALL_STRIKE']) / spot
+                    if dist_to_support <= 0.005: # Spot is within 0.5% of Support Wall
+                        print(f"[{symbol}] Spot (₹{spot}) testing Support (₹{pe_wall['WALL_STRIKE']})")
+                        process_signal(symbol, spot, "BUY")
+                        
+                # Check Resistance (CE Wall) for SELL triggers
+                if ce_wall:
+                    dist_to_resistance = abs(spot - ce_wall['WALL_STRIKE']) / spot
+                    if dist_to_resistance <= 0.005: # Spot is within 0.5% of Resistance Wall
+                        print(f"[{symbol}] Spot (₹{spot}) testing Resistance (₹{ce_wall['WALL_STRIKE']})")
+                        process_signal(symbol, spot, "SELL")
+            
+            print("Cycle complete. Waiting for next interval...\n")
+            time.sleep(60) # Pause before next full market scan
+            
+        except KeyboardInterrupt:
+            print("\nEngine stopped by user.")
+            break
+        except Exception as e:
+            print(f"Engine Loop Error: {e}")
+            time.sleep(10)
+
+if __name__ == "__main__":
+    # Ensure SQLite DB is initialized before running
+    conn = sqlite3.connect("paper_trades.db")
+    conn.execute('''CREATE TABLE IF NOT EXISTS trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT, direction TEXT, qty INTEGER, 
+                        entry_price REAL, current_stop_pct REAL, 
+                        mfe_pct REAL, tsl_active INTEGER, 
+                        status TEXT, exit_price REAL, net_pnl REAL, 
+                        entry_time TEXT, exit_time TEXT)''')
+    conn.close()
+    
+    run_engine()
