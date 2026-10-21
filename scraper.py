@@ -4,14 +4,13 @@ import yfinance as yf
 import time
 from datetime import datetime, timedelta
 
-
 class LiveMarketFetcher:
     def __init__(self):
         # curl_cffi bypasses Akamai TLS fingerprinting
         self.session = requests.Session(impersonate="chrome120")
         self.session.headers.update({
             "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.nseindia.com/option-chain"  # Critical for bypassing the hang
+            "Referer": "https://www.nseindia.com/option-chain"  
         })
         self._init_nse_cookies()
 
@@ -55,16 +54,26 @@ class LiveMarketFetcher:
                     walls = []
                     
                     for opt_type in ['CE', 'PE']:
-                        if opt_type in df.columns or f'{opt_type}.openInterest' in df.columns:
-                            oi_col = f'{opt_type}.openInterest'
-                            strike_col = 'strikePrice'
-                            
+                        oi_col = f'{opt_type}.openInterest'
+                        strike_col = 'strikePrice'
+                        expiry_col = f'{opt_type}.expiryDate'
+                        
+                        if oi_col in df.columns:
                             valid_strikes = df[df[oi_col] >= min_oi_threshold].copy()
                             if valid_strikes.empty: continue
                                 
                             valid_strikes = valid_strikes.sort_values(by=oi_col, ascending=False)
                             max_row = valid_strikes.iloc[0]
                             total_oi = df[oi_col].sum()
+                            
+                            # Calculate Days to Expiry (DTE) from NSE date format (e.g., '29-Oct-2026')
+                            dte = 0
+                            if expiry_col in max_row and pd.notna(max_row[expiry_col]):
+                                try:
+                                    exp_date = datetime.strptime(max_row[expiry_col], "%d-%b-%Y").date()
+                                    dte = (exp_date - datetime.now().date()).days
+                                except Exception:
+                                    pass
                             
                             walls.append({
                                 'SYMBOL': symbol,
@@ -74,7 +83,8 @@ class LiveMarketFetcher:
                                 'WALL_OI': max_row[oi_col],
                                 'TOTAL_TYPE_OI': total_oi,
                                 'CONCENTRATION': max_row[oi_col] / total_oi if total_oi > 0 else 0,
-                                'DIST_PCT': abs(((max_row[strike_col] - spot) / spot) * 100.0)
+                                'DIST_PCT': abs(((max_row[strike_col] - spot) / spot) * 100.0),
+                                'DAYS_TO_EXPIRY': dte  # Feed for engine's DTE filter
                             })
                     return walls
             except Exception:
