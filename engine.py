@@ -18,7 +18,6 @@ def get_master_lot_sizes():
     url = "https://api.kite.trade/instruments"
     try:
         df = pd.read_csv(url)
-        # Filter for F&O exchange and drop duplicate tickers to map one lot size per symbol
         nfo_df = df[df['exchange'] == 'NFO'].copy()
         lot_map = nfo_df.drop_duplicates(subset=['name'])[['name', 'lot_size']]
         
@@ -35,23 +34,27 @@ def get_master_lot_sizes():
 
 NSE_MASTER_LOTS = get_master_lot_sizes()
 
-def get_lot_size(symbol, entry_price=100):
+def get_lot_size(symbol):
     """Returns official exchange multiple from Kite."""
     sym = symbol.strip().upper()
     return int(NSE_MASTER_LOTS.get(sym, 1))
 
 # ---------------------------------------------------------
-# 2. DYNAMIC WATCHLIST CONFIGURATION
+# 2. DYNAMIC WATCHLIST & BACKTEST CONSTRAINTS
 # ---------------------------------------------------------
-# Automatically extract all valid F&O tickers from the Kite data pull
 DYNAMIC_WATCHLIST = list(NSE_MASTER_LOTS.keys())
 print(f"Engine will scan {len(DYNAMIC_WATCHLIST)} F&O symbols dynamically.")
+
+# V11 Tested Settings
+MIN_DTE = 8
+MAX_DTE = 22
+MIN_CHAIN_CONCENTRATION = 0.25
+PROXIMITY_THRESHOLD = 0.0075
 
 # ---------------------------------------------------------
 # 3. DATABASE OPERATIONS
 # ---------------------------------------------------------
 def log_trade_to_db(ticker, direction, qty, entry_price):
-    """Inserts newly executed trade matching existing schema."""
     try:
         conn = sqlite3.connect("paper_trades.db")
         cursor = conn.cursor()
@@ -67,7 +70,6 @@ def log_trade_to_db(ticker, direction, qty, entry_price):
             ticker, direction, qty, entry_price,
             0.02, 0.0, 0, 'OPEN', None, 0.0, ts, None
         ))
-        
         conn.commit()
         conn.close()
         print(f"[DB] Logged {direction} trade for {ticker} ({qty} shares @ ₹{entry_price:.2f})")
@@ -75,7 +77,6 @@ def log_trade_to_db(ticker, direction, qty, entry_price):
         print(f"[DB ERROR] Failed to log trade: {e}")
 
 def get_open_positions():
-    """Retrieves all currently open positions."""
     try:
         conn = sqlite3.connect("paper_trades.db")
         cursor = conn.cursor()
@@ -88,7 +89,6 @@ def get_open_positions():
         return []
 
 def close_trade_in_db(trade_id, exit_price, pnl):
-    """Marks an open trade as CLOSED with final PnL."""
     try:
         conn = sqlite3.connect("paper_trades.db")
         cursor = conn.cursor()
@@ -108,7 +108,6 @@ def close_trade_in_db(trade_id, exit_price, pnl):
 # 4. POSITION MONITOR & TSL (TRAILING STOP LOSS)
 # ---------------------------------------------------------
 def calculate_indian_futures_fees(entry_price, exit_price, qty, direction):
-    """Calculates Zerodha brokerage + 2026 STT + Exchange + Stamp + GST for Futures ONLY."""
     entry_val = entry_price * qty
     exit_val = exit_price * qty
     total_val = entry_val + exit_val
@@ -117,7 +116,6 @@ def calculate_indian_futures_fees(entry_price, exit_price, qty, direction):
     exit_brokerage = min(exit_val * 0.0003, 20.0)
     total_brokerage = entry_brokerage + exit_brokerage
 
-    # 2026 Revised STT Rate
     sell_val = exit_val if direction == "BUY" else entry_val
     stt = sell_val * 0.0005 
 
@@ -144,26 +142,17 @@ def manage_open_positions():
                 continue
             spot = walls[0]['SPOT']
             
-            # Calculate PnL percentage
-            if direction == "BUY":
-                pnl_pct = (spot - entry_price) / entry_price
-            else:
-                pnl_pct = (entry_price - spot) / entry_price
+            pnl_pct = (spot - entry_price) / entry_price if direction == "BUY" else (entry_price - spot) / entry_price
             
-            # Trailing Stop Loss trigger at 1.5% profit
             if pnl_pct >= 0.015 and not tsl_active:
                 tsl_active = 1
-                current_stop_pct = 0.005  # Lock in +0.5% minimum profit
+                current_stop_pct = 0.005 
                 print(f"[TSL ACTIVATED] {symbol} locked at +0.5%")
             
-            # Stop condition check
             if (direction == "BUY" and spot <= entry_price * (1 - current_stop_pct)) or \
                (direction == "SELL" and spot >= entry_price * (1 + current_stop_pct)):
                 
-                # Calculate Gross PnL using real lot quantity
                 gross_pnl = (spot - entry_price) * qty if direction == "BUY" else (entry_price - spot) * qty
-                
-                # Deduct true F&O fees and taxes
                 fees = calculate_indian_futures_fees(entry_price, spot, qty, direction)
                 net_pnl = gross_pnl - fees
                 
@@ -171,7 +160,6 @@ def manage_open_positions():
                 print(f"--> Gross PnL: ₹{gross_pnl:.2f} | Fees & Taxes: ₹{fees:.2f} | Net PnL: ₹{net_pnl:.2f}")
                 
                 close_trade_in_db(trade_id, spot, net_pnl)
-                
                 AVAILABLE_CAPITAL += (entry_price * qty) + net_pnl
                 
         except Exception as e:
@@ -183,13 +171,10 @@ def manage_open_positions():
 def process_signal(ticker, entry_price, direction):
     global AVAILABLE_CAPITAL
     
-    # Check if we already have an open position in this stock
     open_symbols = [row[1] for row in get_open_positions()]
     if ticker in open_symbols:
-        print(f"Skipping {ticker} - already hold an active position.")
         return
 
-    # Calculate required margin using official Kite lot size
     qty = get_lot_size(ticker)
     margin_required = qty * entry_price * 0.20 
     
@@ -197,7 +182,6 @@ def process_signal(ticker, entry_price, direction):
         print(f"Insufficient capital for {ticker}. Required: ₹{margin_required:.2f}, Available: ₹{AVAILABLE_CAPITAL:.2f}")
         return
 
-    # Execute Paper Trade
     AVAILABLE_CAPITAL -= margin_required
     log_trade_to_db(ticker, direction, qty, entry_price)
 
@@ -212,32 +196,42 @@ def run_engine():
         try:
             manage_open_positions()
             
-            # Loop through the dynamically generated list of all 180+ F&O stocks
             for symbol in DYNAMIC_WATCHLIST:
-                time.sleep(1) # Rate limit protection for scraper
+                time.sleep(1)
                 walls = fetcher.fetch_live_walls(symbol)
                 
                 if not walls:
                     continue
                     
                 spot = walls[0]['SPOT']
-                
                 pe_wall = next((w for w in walls if w['OPTION_TYP'] == 'PE'), None)
                 ce_wall = next((w for w in walls if w['OPTION_TYP'] == 'CE'), None)
                 
-                # Check Support (PE Wall) for BUY triggers
+                # Evaluate PE Wall (Support -> BUY Signal)
                 if pe_wall:
-                    dist_to_support = abs(spot - pe_wall['WALL_STRIKE']) / spot
-                    if dist_to_support <= 0.005: 
-                        print(f"[{symbol}] Spot (₹{spot}) testing Support (₹{pe_wall['WALL_STRIKE']})")
-                        process_signal(symbol, spot, "BUY")
-                        
-                # Check Resistance (CE Wall) for SELL triggers
+                    dte = pe_wall.get('DAYS_TO_EXPIRY', 0)
+                    wall_oi = pe_wall.get('WALL_OI', 0)
+                    total_oi = pe_wall.get('TOTAL_TYPE_OI', 1)
+                    concentration = wall_oi / total_oi if total_oi > 0 else 0
+                    
+                    if (MIN_DTE <= dte <= MAX_DTE) and (concentration >= MIN_CHAIN_CONCENTRATION):
+                        dist_to_support = abs(spot - pe_wall['WALL_STRIKE']) / spot
+                        if dist_to_support <= PROXIMITY_THRESHOLD: 
+                            print(f"[{symbol}] Spot (₹{spot}) testing Support (₹{pe_wall['WALL_STRIKE']}) | DTE: {dte} | Conc: {concentration*100:.1f}%")
+                            process_signal(symbol, spot, "BUY")
+                            
+                # Evaluate CE Wall (Resistance -> SELL Signal)
                 if ce_wall:
-                    dist_to_resistance = abs(spot - ce_wall['WALL_STRIKE']) / spot
-                    if dist_to_resistance <= 0.005: 
-                        print(f"[{symbol}] Spot (₹{spot}) testing Resistance (₹{ce_wall['WALL_STRIKE']})")
-                        process_signal(symbol, spot, "SELL")
+                    dte = ce_wall.get('DAYS_TO_EXPIRY', 0)
+                    wall_oi = ce_wall.get('WALL_OI', 0)
+                    total_oi = ce_wall.get('TOTAL_TYPE_OI', 1)
+                    concentration = wall_oi / total_oi if total_oi > 0 else 0
+                    
+                    if (MIN_DTE <= dte <= MAX_DTE) and (concentration >= MIN_CHAIN_CONCENTRATION):
+                        dist_to_resistance = abs(spot - ce_wall['WALL_STRIKE']) / spot
+                        if dist_to_resistance <= PROXIMITY_THRESHOLD: 
+                            print(f"[{symbol}] Spot (₹{spot}) testing Resistance (₹{ce_wall['WALL_STRIKE']}) | DTE: {dte} | Conc: {concentration*100:.1f}%")
+                            process_signal(symbol, spot, "SELL")
             
             print("Cycle complete. Waiting for next interval...\n")
             time.sleep(60) 
