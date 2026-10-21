@@ -38,16 +38,14 @@ NSE_MASTER_LOTS = get_master_lot_sizes()
 def get_lot_size(symbol, entry_price=100):
     """Returns official exchange multiple from Kite."""
     sym = symbol.strip().upper()
-    # Cast to int, falling back to 1 if missing
     return int(NSE_MASTER_LOTS.get(sym, 1))
 
 # ---------------------------------------------------------
-# 2. WATCHLIST CONFIGURATION
+# 2. DYNAMIC WATCHLIST CONFIGURATION
 # ---------------------------------------------------------
-WATCHLIST = [
-    "YESBANK", "SAMMAANCAP", "PRESTIGE", "IRFC", 
-    "LICHSGFIN", "INDUSTOWER", "MPHASIS"
-]
+# Automatically extract all valid F&O tickers from the Kite data pull
+DYNAMIC_WATCHLIST = list(NSE_MASTER_LOTS.keys())
+print(f"Engine will scan {len(DYNAMIC_WATCHLIST)} F&O symbols dynamically.")
 
 # ---------------------------------------------------------
 # 3. DATABASE OPERATIONS
@@ -174,7 +172,6 @@ def manage_open_positions():
                 
                 close_trade_in_db(trade_id, spot, net_pnl)
                 
-                # Return released margin + net pnl to available capital
                 AVAILABLE_CAPITAL += (entry_price * qty) + net_pnl
                 
         except Exception as e:
@@ -194,7 +191,7 @@ def process_signal(ticker, entry_price, direction):
 
     # Calculate required margin using official Kite lot size
     qty = get_lot_size(ticker)
-    margin_required = qty * entry_price * 0.20 # Assuming 20% margin requirement for F&O
+    margin_required = qty * entry_price * 0.20 
     
     if margin_required > AVAILABLE_CAPITAL:
         print(f"Insufficient capital for {ticker}. Required: ₹{margin_required:.2f}, Available: ₹{AVAILABLE_CAPITAL:.2f}")
@@ -215,7 +212,8 @@ def run_engine():
         try:
             manage_open_positions()
             
-            for symbol in WATCHLIST:
+            # Loop through the dynamically generated list of all 180+ F&O stocks
+            for symbol in DYNAMIC_WATCHLIST:
                 time.sleep(1) # Rate limit protection for scraper
                 walls = fetcher.fetch_live_walls(symbol)
                 
@@ -224,26 +222,25 @@ def run_engine():
                     
                 spot = walls[0]['SPOT']
                 
-                # Extract specific walls from the scraper list
                 pe_wall = next((w for w in walls if w['OPTION_TYP'] == 'PE'), None)
                 ce_wall = next((w for w in walls if w['OPTION_TYP'] == 'CE'), None)
                 
                 # Check Support (PE Wall) for BUY triggers
                 if pe_wall:
                     dist_to_support = abs(spot - pe_wall['WALL_STRIKE']) / spot
-                    if dist_to_support <= 0.005: # Spot is within 0.5% of Support Wall
+                    if dist_to_support <= 0.005: 
                         print(f"[{symbol}] Spot (₹{spot}) testing Support (₹{pe_wall['WALL_STRIKE']})")
                         process_signal(symbol, spot, "BUY")
                         
                 # Check Resistance (CE Wall) for SELL triggers
                 if ce_wall:
                     dist_to_resistance = abs(spot - ce_wall['WALL_STRIKE']) / spot
-                    if dist_to_resistance <= 0.005: # Spot is within 0.5% of Resistance Wall
+                    if dist_to_resistance <= 0.005: 
                         print(f"[{symbol}] Spot (₹{spot}) testing Resistance (₹{ce_wall['WALL_STRIKE']})")
                         process_signal(symbol, spot, "SELL")
             
             print("Cycle complete. Waiting for next interval...\n")
-            time.sleep(60) # Pause before next full market scan
+            time.sleep(60) 
             
         except KeyboardInterrupt:
             print("\nEngine stopped by user.")
@@ -253,7 +250,6 @@ def run_engine():
             time.sleep(10)
 
 if __name__ == "__main__":
-    # Ensure SQLite DB is initialized before running
     conn = sqlite3.connect("paper_trades.db")
     conn.execute('''CREATE TABLE IF NOT EXISTS trades (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
